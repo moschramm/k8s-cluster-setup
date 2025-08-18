@@ -37,7 +37,7 @@ resource "libvirt_cloudinit_disk" "commoninit" {
 }
 
 # Create the machine
-resource "libvirt_domain" "control_domain" {
+resource "libvirt_domain" "domains" {
   for_each = var.vms
 
   name   = each.value.name
@@ -62,7 +62,3 @@ resource "libvirt_domain" "control_domain" {
 
   graphics {}
 }
-
-
-
-# IPs: use wait_for_lease true or after creation use terraform refresh and terraform show for the ips of domain
