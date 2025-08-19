@@ -2,3 +2,4 @@
 terraform.tfstate
 terraform.tfstate.backup
 .terraform/
+terraform/ubuntu-24.04-server-cloudimg-amd64.img

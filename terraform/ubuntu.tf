@@ -16,7 +16,7 @@ provider "libvirt" {
 # We fetch the ubuntu release image from their mirrors
 resource "libvirt_volume" "ubuntu_server" {
   name   = "ubuntu-server"
-  source = "https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-amd64.img"
+  source = "./ubuntu-24.04-server-cloudimg-amd64.img" # local image resized to 40GB
 }
 
 # volume to attach to the node's domain as main disk
