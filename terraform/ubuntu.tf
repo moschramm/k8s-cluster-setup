@@ -13,6 +13,37 @@ provider "libvirt" {
   uri = "qemu:///system"
 }
 
+# Create the NAT network
+resource "libvirt_network" "k8s_net" {
+  name   = "k8s-net"
+  mode   = "nat"
+  bridge = "virbr-k8s"
+  domain = "k8s.local"
+
+  # NAT outbound traffic
+  addresses = ["192.168.122.0/24"]
+
+  dhcp {
+    enabled = true
+  }
+
+  # TODO: specify dns.hosts using node variables
+  dns {
+    enabled = true
+    hosts {
+      hostname = "control-01"
+      ip       = "192.168.122.2"
+    }
+    hosts {
+      hostname = "worker-01"
+      ip       = "192.168.122.3"
+    }
+  }
+
+  # Ensure the network survives host reboot
+  # autostart = true
+}
+
 # We fetch the ubuntu release image from their mirrors
 resource "libvirt_volume" "ubuntu_server" {
   name   = "ubuntu-server"
@@ -57,7 +88,7 @@ resource "libvirt_domain" "domains" {
   }
 
   network_interface {
-    bridge = "br0"
+    network_name = "k8s-net"
   }
 
   graphics {}
