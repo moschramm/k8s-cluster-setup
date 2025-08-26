@@ -1,0 +1,213 @@
+---
+- name: Install kubernetes on all cluster nodes
+  hosts: cluster
+  become: true
+  vars:
+    calico_cidr: 10.10.0.0/16
+    k8s_pkg_version: 1.33
+    calico_operator_url: "https://raw.githubusercontent.com/projectcalico/calico/v3.30.3/manifests/tigera-operator.yaml"
+    calico_cr_url: "https://raw.githubusercontent.com/projectcalico/calico/v3.30.0/manifests/custom-resources.yaml"
+
+  tasks:
+    # --- Hostname & /etc/hostname ---
+    - name: Set hostname
+      ansible.builtin.hostname:
+        name: "{{ hostname }}"
+
+    - name: Update /etc/hostname
+      ansible.builtin.lineinfile:
+        path: /etc/hostname
+        regexp: '^ubuntu$'
+        line: "{{ hostname }}"
+
+    - name: Record kubeconfig path for all hosts
+      ansible.builtin.set_fact:
+        kubeconfig_env: /etc/kubernetes/admin.conf
+      run_once: true
+
+    # --- Kernel modules ---
+    - name: Load kernel modules
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    - name: Persist modules
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+        mode: '0644'
+
+    # --- Sysctl ---
+    - name: Configure k8s sysctl
+      ansible.posix.sysctl:
+        name: "{{ item.key }}"
+        value: "{{ item.value }}"
+        state: present
+        reload: true
+      loop:
+        - { key: net.bridge.bridge-nf-call-iptables, value: '1' }
+        - { key: net.bridge.bridge-nf-call-ip6tables, value: '1' }
+        - { key: net.ipv4.ip_forward, value: '1' }
+
+    # --- Docker ---
+    - name: Install Docker
+      ansible.builtin.apt:
+        name: docker.io
+        state: present
+        update_cache: true
+
+    - name: Enable & start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    # --- containerd ---
+    - name: Create containerd config dir
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+
+    - name: Generate containerd default config
+      ansible.builtin.shell: |
+        containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+
+    - name: Enable SystemdCgroup
+      ansible.builtin.lineinfile:
+        path: /etc/containerd/config.toml
+        regexp: '^\s*SystemdCgroup\s*=\s*false'
+        line: '            SystemdCgroup = true'
+
+    - name: Restart containerd
+      ansible.builtin.systemd:
+        name: containerd
+        daemon_reload: true
+        state: restarted
+
+    # --- Kubernetes packages ---
+    - name: Ensure keyrings directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download & de-armor K8s APT key
+      ansible.builtin.shell: |
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.33/deb/Release.key \
+        | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+      args:
+        creates: /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+    - name: Add K8s APT repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] \
+              https://pkgs.k8s.io/core:/stable:/v1.33/deb/ /"
+        state: present
+        update_cache: true
+
+    - name: Install kubelet, kubeadm, kubectl
+      ansible.builtin.apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+
+    - name: Hold K8s packages
+      ansible.builtin.shell: |
+        apt-mark hold kubelet kubeadm kubectl
+
+# ---------------- Control-plane specific ----------------
+- name: Initialize control plane
+  hosts: control_nodes
+  become: true
+  vars:
+    calico_cidr: 10.10.0.0/16
+    calico_operator_url: "https://raw.githubusercontent.com/projectcalico/calico/v3.30.3/manifests/tigera-operator.yaml"
+    calico_cr_url: "https://raw.githubusercontent.com/projectcalico/calico/v3.30.0/manifests/custom-resources.yaml"
+  tasks:
+    - name: Init kubeadm
+      ansible.builtin.shell: |
+        kubeadm init --pod-network-cidr={{ calico_cidr }}
+      args:
+        creates: /etc/kubernetes/admin.conf
+      register: kubeadm_init
+
+    # TODO: set KUBECONFIG env var dynamically depending on root/non-root
+
+    - name: Create $HOME/.kube for non-root
+      ansible.builtin.file:
+        path: "{{ ansible_env.HOME }}/.kube"
+        state: directory
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0755'
+      when: ansible_user != 'root'
+
+    - name: Copy admin.conf to non-root user
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ ansible_env.HOME }}/.kube/config"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        mode: '0600'
+        remote_src: true
+      when: ansible_user != 'root'
+
+    - name: Install Calico operator
+      ansible.builtin.shell: |
+        kubectl apply -f {{ calico_operator_url }}
+      args:
+        executable: /bin/bash
+      environment:
+        KUBECONFIG: "{{ kubeconfig_env }}"
+
+    - name: Download Calico custom-resources.yaml
+      ansible.builtin.get_url:
+        url: "{{ calico_cr_url }}"
+        dest: /tmp/custom-resources.yaml
+        mode: '0644'
+
+    - name: Patch CIDR in custom-resources.yaml
+      ansible.builtin.replace:
+        path: /tmp/custom-resources.yaml
+        regexp: '192\.168\.0\.0\/16'
+        replace: '{{ calico_cidr }}'
+
+    - name: Wait for CRDs to be served
+      ansible.builtin.shell: kubectl wait --for condition=established crd/installations.operator.tigera.io --timeout=300s
+      changed_when: false
+      environment:
+        KUBECONFIG: "{{ kubeconfig_env }}"
+
+    - name: Apply Calico custom resources
+      ansible.builtin.shell: kubectl apply -f /tmp/custom-resources.yaml
+      environment:
+        KUBECONFIG: "{{ kubeconfig_env }}"
+
+
+    - name: Wait for node Ready
+      ansible.builtin.shell: kubectl wait --for=condition=Ready node/{{ inventory_hostname }} --timeout=300s
+      environment:
+        KUBECONFIG: "{{ kubeconfig_env }}"
+
+# ---------------- Worker-node specific ----------------
+- name: Join workers to cluster
+  hosts: worker_nodes
+  become: true
+  tasks:
+    - name: Get join command
+      ansible.builtin.command: kubeadm token create --print-join-command
+      delegate_to: "{{ groups['control_nodes'][0] }}"
+      register: _join_cmd
+      changed_when: false
+
+    - name: Join worker
+      ansible.builtin.command: "{{ _join_cmd.stdout }}"
