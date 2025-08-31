@@ -8,3 +8,6 @@ terraform/ubuntu-24.04-server-cloudimg-amd64.img
 
 # direnv directory
 .direnv/
+
+# kubeconfig copied from cluster
+ansible/kubeconfig

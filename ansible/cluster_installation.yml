@@ -192,11 +192,17 @@
       environment:
         KUBECONFIG: "{{ kubeconfig_env }}"
 
-
     - name: Wait for node Ready
       ansible.builtin.shell: kubectl wait --for=condition=Ready node/{{ inventory_hostname }} --timeout=300s
       environment:
         KUBECONFIG: "{{ kubeconfig_env }}"
+
+    - name: Copy kubeconfig from control-plane node to localhost
+      ansible.builtin.fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: "{{ playbook_dir }}/kubeconfig"
+        flat: true
+        mode: "0600"
 
 # ---------------- Worker-node specific ----------------
 - name: Join workers to cluster
